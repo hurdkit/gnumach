@@ -55,7 +55,6 @@ type	io_perm_t	=	mach_port_t
 #if	KERNEL_SERVER
 		intran: io_perm_t convert_port_to_io_perm(mach_port_t)
 		outtran: mach_port_t convert_io_perm_to_port(io_perm_t)
-		destructor: io_perm_deallocate(io_perm_t)
 #endif	/* KERNEL_SERVER */
 		;
 

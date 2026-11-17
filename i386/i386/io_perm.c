@@ -83,6 +83,18 @@ static struct device_emulation_ops io_perm_device_emulation_ops;
 /* Flag to hold PCI io cfg access lock */
 static boolean_t taken_pci_cfg = FALSE;
 
+/* Protects taken_pci_cfg.  */
+def_simple_lock_data(static, taken_pci_cfg_lock)
+
+/* Release the PCI cfg range reservation.  */
+static void
+pci_cfg_release (void)
+{
+  simple_lock (&taken_pci_cfg_lock);
+  taken_pci_cfg = FALSE;
+  simple_unlock (&taken_pci_cfg_lock);
+}
+
 /* The outtran which allows MIG to convert an io_perm_t object to a port
    representing it.  */
 ipc_port_t
@@ -118,16 +130,6 @@ convert_port_to_io_perm (ipc_port_t port)
   return io_perm;
 }
 
-/* The destructor which is called when the last send right to a port
-   representing an io_perm_t object vanishes.  */
-void
-io_perm_deallocate (io_perm_t io_perm)
-{
-  /* We need to check if the io_perm was a PCI cfg one and release it */
-  if (CONTAINS_PCI_CFG(io_perm->from, io_perm->to))
-    taken_pci_cfg = FALSE;
-}
-
 /* Our ``no senders'' handling routine.  Deallocate the object.  */
 static
 void
@@ -139,6 +141,10 @@ no_senders (mach_no_senders_notification_t *notification)
     ((ipc_port_t) notification->not_header.msgh_remote_port);
 
   assert (io_perm != IO_PERM_NULL);
+
+  /* The object is going away, so its range is free again.  */
+  if (CONTAINS_PCI_CFG(io_perm->from, io_perm->to))
+    pci_cfg_release ();
 
   ipc_kobject_set (io_perm->port, IKO_NULL, IKOT_NONE);
   ipc_port_dealloc_kernel (io_perm->port);
@@ -194,15 +200,30 @@ i386_io_perm_create (const ipc_port_t master_port, io_port_t from, io_port_t to,
   if (from > to)
     return KERN_INVALID_ARGUMENT;
 
-  /* Only one process may take a range that includes PCI cfg registers */
-  if (taken_pci_cfg && CONTAINS_PCI_CFG(from, to))
-    return KERN_PROTECTION_FAILURE;
+  /* Only one process may take a range that includes PCI cfg registers.
+     Reserve the range before the allocations below, which can fail;
+     the reservation is rolled back on the error paths and released
+     when the last send right to the io_perm vanishes.  */
+  boolean_t pci_cfg = CONTAINS_PCI_CFG(from, to);
+  simple_lock (&taken_pci_cfg_lock);
+  if (taken_pci_cfg && pci_cfg)
+    {
+      simple_unlock (&taken_pci_cfg_lock);
+      return KERN_PROTECTION_FAILURE;
+    }
+  if (pci_cfg)
+    taken_pci_cfg = TRUE;
+  simple_unlock (&taken_pci_cfg_lock);
 
   io_perm_t io_perm;
 
   io_perm = (io_perm_t) kalloc (sizeof *io_perm);
   if (io_perm == NULL)
-    return KERN_RESOURCE_SHORTAGE;
+    {
+      if (pci_cfg)
+	pci_cfg_release ();
+      return KERN_RESOURCE_SHORTAGE;
+    }
 
   io_perm->from = from;
   io_perm->to = to;
@@ -210,6 +231,8 @@ i386_io_perm_create (const ipc_port_t master_port, io_port_t from, io_port_t to,
   io_perm->port = ipc_port_alloc_kernel ();
   if (io_perm->port == IP_NULL)
     {
+      if (pci_cfg)
+	pci_cfg_release ();
       kfree ((vm_offset_t) io_perm, sizeof *io_perm);
       return KERN_RESOURCE_SHORTAGE;
     }
@@ -228,9 +251,6 @@ i386_io_perm_create (const ipc_port_t master_port, io_port_t from, io_port_t to,
   assert(notify == IP_NULL);
 
   *new = io_perm;
-
-  if (CONTAINS_PCI_CFG(from, to))
-    taken_pci_cfg = TRUE;
 
   return KERN_SUCCESS;
 }
