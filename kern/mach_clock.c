@@ -589,6 +589,13 @@ time_value64_add_hpc(time_value64_t *value, uint64_t last_hpc)
 	/* Time since the last clock interrupt in nanosecond.  */
 	int64_t ns = hpclock_read_ns ? hpclock_read_ns() - last_hpc : 0;
 
+	/* A clock that reads behind its reading at the last clock
+	   interrupt, as kvmclock does when the host rewrites its time
+	   info with an earlier time, adds nothing: the time holds at
+	   the last clock interrupt instead of going below it.  */
+	if (ns < 0)
+	    ns = 0;
+
 	/* Limit the value of ns under the period of a clock interrupt,
 	   unless the tick is stopped and clock_catchup owns the gap.  */
 	if (!tickless_active && ns >= tick * 1000)
@@ -625,7 +632,12 @@ void clock_catchup(void)
 	s = splhigh();	/* keep the clock interrupt out */
 
 	now = hpclock_read_ns();
-	ns = now - last_hpc_read;
+	/* A clock that reads behind last_hpc_read has no gap to charge.
+	 * The unsigned difference would wrap to nearly 2^64 ns, all of
+	 * it charged to the time and, as ticks, to elapsed_ticks, and
+	 * softclock would walk every one of those ticks.  last_hpc_read
+	 * still moves to this reading below.  */
+	ns = now > last_hpc_read ? now - last_hpc_read : 0;
 
 	/* A gap past one second carries whole seconds.  The add
 	 * nanos macro normalises a single step only, so charging a
