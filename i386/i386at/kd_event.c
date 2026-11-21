@@ -131,15 +131,37 @@ kbdopen(dev_t dev, int flags, io_req_t ior)
  * reset various flags.
  */
 
+/* Complete a read that was blocked when the device got closed: nothing
+ * was transferred.  */
+static boolean_t
+kbd_close_read_reply(
+	io_req_t	ior)
+{
+	ior->io_residual = ior->io_count;
+	ior->io_error = D_DEVICE_DOWN;
+	(void) ds_read_done(ior);
+	return (TRUE);
+}
+
 /*ARGSUSED*/
 void
 kbdclose(
 	dev_t 	dev,
 	int 	flags)
 {
-	spl_t s = SPLKD();
+	io_req_t	ior;
+	spl_t		s = SPLKD();
 
 	kb_mode = KB_ASCII;
+
+	/* Flush the read queue.  Now that kb_mode is back to KB_ASCII,
+	 * kbd_enqueue no longer completes queued reads for this device,
+	 * so they would otherwise block forever.  */
+	while ((ior = (io_req_t)dequeue_head(&kbd_read_queue)) != 0) {
+	    ior->io_done = kbd_close_read_reply;
+	    iodone(ior);
+	}
+
 	kdq_reset(&kbd_queue);
 	splx(s);
 }
