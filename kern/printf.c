@@ -120,6 +120,7 @@
 #include <string.h>
 #include <device/cons.h>
 #include <kern/printf.h>
+#include <kern/lock.h>
 #include <mach/boolean.h>
 
 
@@ -497,9 +498,27 @@ void _doprnt(
  * Printing (to console)
  */
 
+/*
+ * Console output lock: on SMP, concurrent printf calls from different CPUs
+ * would otherwise interleave character by character on the console device.
+ * The _irq form is required: printf can be called from interrupt context,
+ * and with interrupts disabled for the write the same CPU cannot re-enter
+ * the lock from a handler, while other CPUs spin briefly at worst.  On UP
+ * this compiles away.
+ */
+def_simple_lock_data (static, printf_lock);
+
 int vprintf(const char *fmt, va_list listp)
 {
+	spl_t s = -1;
+
+	if (spl_init)
+		s = simple_lock_irq (&printf_lock);
+
 	_doprnt(fmt, listp, (void (*)( char, vm_offset_t)) cnputc, 16, 0);
+
+	if (spl_init)
+		simple_unlock_irq (s, &printf_lock);
 	return 0;
 }
 
