@@ -60,6 +60,12 @@ def_simple_lock_irq_data(static, intr_lock)
 #define STALE_UNACKED_SWEEPS 5
 
 queue_head_t main_intr_queue;
+
+/* True while any entry may have unacknowledged deliveries, set when a
+ * delivery is queued, cleared by the recovery sweep once no entry has
+ * unacked counts left.  Gates the once-per-wake sweep so an idle queue
+ * costs one branch instead of a full walk.  */
+static boolean_t intr_recover_pending = FALSE;
 static boolean_t deliver_intr (int id, ipc_port_t dst_port);
 
 #ifndef LINUX_DEV
@@ -154,6 +160,7 @@ queue_intr (struct irqdev *dev, int id, user_intr_t *e)
   e->stale = 0;
   e->interrupts++;
   dev->tot_num_intr++;
+  intr_recover_pending = TRUE;
 #ifdef LINUX_DEV
   simple_unlock_irq(s, &intr_lock);
 #endif
@@ -374,21 +381,44 @@ intr_thread (void)
 	      irqtab.tot_num_intr -= e->interrupts;
 	      e->interrupts = 0;
 
-#if 0
 #ifndef LINUX_DEV
-	      // TODO: remove from the action list
-#else
-	      // FIXME: with the Linux irq handler we don't actually control the action list
-#endif
+	      /* Remove the handler from the per-irq list: with the port
+	       * released and the entry dequeued nothing else references
+	       * the entry, so both can be freed.  */
+	      {
+		struct intr_list **prev = &user_intr_handlers[e->id];
+		while (*prev)
+		  {
+		    if ((*prev)->user_intr == e)
+		      {
+			struct intr_list *l = *prev;
+			*prev = l->next;
+			simple_unlock_irq(s, &intr_lock);
+			kfree ((vm_offset_t) l, sizeof (*l));
+			s = simple_lock_irq(&intr_lock);
+			break;
+		      }
+		    prev = &(*prev)->next;
+		  }
+	      }
 	      simple_unlock_irq(s, &intr_lock);
 	      kfree ((vm_offset_t) e, sizeof (*e));
 	      s = simple_lock_irq(&intr_lock);
+#else
+	      /* With the Linux irq glue we don't control the action list:
+	       * the glue unlinks this entry's action when the next
+	       * interrupt finds its port gone, so the entry has to stay
+	       * allocated until then.  */
 #endif
 	    }
 	}
       while (del || irqtab.tot_num_intr);
 
-      /* Recovery sweep, once per wake: notifications delivered but
+      /* Recovery sweep, once per wake, but only while unacknowledged
+       * deliveries may exist: queue_intr raises intr_recover_pending,
+       * and the sweep clears it once no entry has unacked counts left,
+       * so a fully acked queue costs one branch instead of a walk.
+       * Notifications delivered but
        * never acked keep the per-irq nesting counter (i386/i386/irq.c)
        * above zero, which masks a shared irq line for every driver on
        * it.  Alive-but-stuck entries are never reaped, so drop their
@@ -397,29 +427,44 @@ intr_thread (void)
        * refires and notifies the driver afresh.  A late ack from a
        * slow-but-alive driver lands on the n_unacked == 0 guard and is
        * rejected.  */
-      queue_iterate (&main_intr_queue, e, user_intr_t *, chain)
+      if (intr_recover_pending)
 	{
-	  if (!e->dst_port || e->dst_port->ip_references == 1)
-	    continue;
+	  boolean_t outstanding = FALSE;
 
-	  if (e->n_unacked && !e->interrupts)
+	  queue_iterate (&main_intr_queue, e, user_intr_t *, chain)
 	    {
-	      e->stale++;
-	      if (e->stale >= STALE_UNACKED_SWEEPS)
+	      if (!e->dst_port || e->dst_port->ip_references == 1)
+		continue;
+
+	      if (e->n_unacked)
 		{
-		  printf ("irq handler [%d]: entry %p left %d irqs unacked,"
-			  " dropping count to unmask the line\n",
-			  e->id, e, e->n_unacked);
-		  while (e->n_unacked)
+		  outstanding = TRUE;
+		  if (e->interrupts)
+		    /* A fresh batch is queued for delivery, the grace
+		     * count restarts when it has been sent.  */
+		    e->stale = 0;
+		  else
 		    {
-		      __enable_irq (irqtab.irq[e->id]);
-		      e->n_unacked--;
+		      e->stale++;
+		      if (e->stale >= STALE_UNACKED_SWEEPS)
+			{
+			  printf ("irq handler [%d]: entry %p left %d irqs unacked,"
+				  " dropping count to unmask the line\n",
+				  e->id, e, e->n_unacked);
+			  while (e->n_unacked)
+			    {
+			      __enable_irq (irqtab.irq[e->id]);
+			      e->n_unacked--;
+			    }
+			  e->stale = 0;
+			}
 		    }
-		  e->stale = 0;
 		}
+	      else
+		e->stale = 0;
 	    }
-	  else
-	    e->stale = 0;
+	  if (!outstanding)
+	    intr_recover_pending = FALSE;
 	}
 
       simple_unlock_irq(s, &intr_lock);
@@ -465,7 +510,17 @@ deliver_intr (int id, ipc_port_t dst_port)
   n->intr_header.msgh_remote_port = dest;
   n->id = id;
 
-  ipc_port_copy_send (dst_port);
+  /* For an inactive port ipc_port_copy_send returns IP_DEAD without
+   * taking a reference, while the dead-port branch of
+   * ipc_mqueue_send_always releases one: sending would drop a
+   * reference that was never taken.  Drop the notification instead;
+   * the dead-entry reap in intr_thread reclaims the entry.  */
+  if (ipc_port_copy_send (dst_port) == IP_DEAD)
+    {
+      ikm_free (kmsg);
+      return TRUE;
+    }
+
   ipc_mqueue_send_always(kmsg);
 
   return TRUE;
