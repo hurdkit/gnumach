@@ -346,20 +346,36 @@ ds_device_intr_register (device_t dev, int id,
 
   mdev = dev->emul_data;
 
+  /* The send right to receive_port is transferred with the request;
+   * release it on every path that does not leave it with an interrupt
+   * entry below.  */
+
   /* No flag is defined for now */
   if (flags != 0)
-    return D_INVALID_OPERATION;
+    {
+      ipc_port_release_send (receive_port);
+      return D_INVALID_OPERATION;
+    }
 
   /* Must be called on the irq device only */
   if (! name_equal(mdev->dev_ops->d_name, 3, "irq"))
-    return D_INVALID_OPERATION;
+    {
+      ipc_port_release_send (receive_port);
+      return D_INVALID_OPERATION;
+    }
 
   if (id < 0 || id >= NINTR)
-    return D_INVALID_OPERATION;
+    {
+      ipc_port_release_send (receive_port);
+      return D_INVALID_OPERATION;
+    }
 
   user_intr_t *e = insert_intr_entry (&irqtab, id, receive_port);
   if (!e)
-    return D_NO_MEMORY;
+    {
+      ipc_port_release_send (receive_port);
+      return D_NO_MEMORY;
+    }
 
   // TODO detect when the port get destroyed because the driver crashes and
   // restart, to replace it when the same device driver calls it again.
@@ -369,6 +385,10 @@ ds_device_intr_register (device_t dev, int id,
       /* If the port is installed successfully, increase its reference by 1.
        * Thus, the port won't be destroyed after its task is terminated. */
       ip_reference (receive_port);
+      /* The registration now holds its own reference: consume the
+       * transferred send right, which would otherwise stay on top of
+       * it for the lifetime of the port.  */
+      ipc_port_release_send (receive_port);
     }
   return err;
 #endif /* MACH_XEN */
@@ -395,8 +415,8 @@ ds_device_intr_ack (device_t dev, ipc_port_t receive_port)
 
   ret = irq_acknowledge(receive_port);
 
-  if (ret == D_SUCCESS)
-    ipc_port_release_send(receive_port);
+  /* The transferred send right is ours to consume on every path.  */
+  ipc_port_release_send(receive_port);
 
   return ret;
 #endif /* MACH_XEN */
