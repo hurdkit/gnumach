@@ -224,10 +224,11 @@ paging_enable(void)
 #if PAE
     set_cr4(get_cr4() | CR4_PAE);
 #endif
-#if MACH_LARGEPAGE
+#if MACH_LARGEPAGE && !PAE
     /* PSE before paging, the kernel page directory holds large
      * page entries for the direct map and they would be read as
-     * page table pointers without it.  */
+     * page table pointers without it.  PAE paging reads them as
+     * 2 MiB pages on its own.  */
     if (CPU_HAS_FEATURE(CPU_FEATURE_PSE))
         set_cr4(get_cr4() | CR4_PSE);
 #endif	/* MACH_LARGEPAGE */

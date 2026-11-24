@@ -61,14 +61,16 @@
 #endif /* __i386__ */
 
 /*
- * MACH_LARGEPAGE: the plain i386 4 MiB large page flavour of PSE is
- * compiled in and may be used for the kernel direct map.  PAE page
- * tables get large pages as 2 MiB pages of their own which this
- * code does not handle, and under Xen the hypervisor owns the page
- * tables, so both are excluded.  The CPU still has to report PSE at
- * run time.
+ * MACH_LARGEPAGE: large pages may be used for the kernel direct map,
+ * one page directory entry per chunk of pdenum2lin(1) bytes.  The
+ * chunk is 4 MiB on non PAE i386, where CR4.PSE is needed and the CPU
+ * still has to report PSE at run time, and 2 MiB on PAE i386 and
+ * x86_64, where the paging mode always reads a PS entry as a 2 MiB
+ * page.  Under Xen the hypervisor owns the page tables, so it is
+ * excluded.
  */
-#if	defined(__i386__) && !defined(PAE) && !defined(MACH_PV_PAGETABLES)
+#if	(defined(__i386__) || defined(__x86_64__)) \
+	&& !defined(MACH_PV_PAGETABLES)
 #define	MACH_LARGEPAGE	1
 #else
 #define	MACH_LARGEPAGE	0

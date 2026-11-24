@@ -799,13 +799,12 @@ i386at_init(const struct multiboot2_raw_info *mb2_info)
 	/* Turn paging on.
 	 * Also set the WP bit so that on 486 or better processors
 	 * page-level write protection works in kernel mode.
-	 * PSE first, the direct map page directory entries use large
-	 * pages and would be read as page table pointers without it.
 	 */
 	set_cr0(get_cr0() & ~(CR0_CD | CR0_NW));
-#if	MACH_LARGEPAGE
+#if	MACH_LARGEPAGE && !PAE
 	/* PSE first, the direct map page directory entries use large
 	 * pages and would be read as page table pointers without it.
+	 * PAE paging reads them as 2 MiB pages on its own.
 	 */
 	if (CPU_HAS_FEATURE(CPU_FEATURE_PSE))
 		set_cr4(get_cr4() | CR4_PSE);

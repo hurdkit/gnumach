@@ -819,7 +819,13 @@ void pmap_bootstrap(void)
 		pt_entry_t global = CPU_HAS_FEATURE(CPU_FEATURE_PGE) ? INTEL_PTE_GLOBAL : 0;
 #if	MACH_LARGEPAGE
 		extern char etext[];
+#if	PAE
+		/* PAE and long mode read a PS entry as a 2 MiB page, whatever
+		   CPUID says about PSE.  */
+		int large_pages = 1;
+#else
 		int large_pages = CPU_HAS_FEATURE(CPU_FEATURE_PSE);
+#endif	/* PAE */
 #endif	/* MACH_LARGEPAGE */
 
 		/*
@@ -842,14 +848,20 @@ void pmap_bootstrap(void)
 			/*
 			 * A chunk holding nothing but plain physical memory,
 			 * fully past the kernel image and fully inside the
-			 * direct map, can go in as one large page when the CPU
-			 * supports them.  That saves a page table per 4 MiB of
-			 * direct map and gives the direct map a far wider TLB
-			 * reach.  Chunks touching the kernel image keep page
-			 * tables, their text pages need read only mappings.
-			 * The bound is written as a subtraction so the last
-			 * chunk before the wrap around at 4 GiB can never pass
-			 * an overflowed addition.
+			 * direct map, can go in as one large page.  That saves a
+			 * page table per chunk of direct map and gives the direct
+			 * map a far wider TLB reach.  The chunk is pdenum2lin(1)
+			 * bytes, 4 MiB on non PAE i386 and 2 MiB under PAE and on
+			 * x86_64.
+			 * Chunks touching the kernel image keep page tables, their
+			 * text pages need read only mappings.  The check on etext
+			 * keeps the chunk at phystokv(0) plain as well, since the
+			 * image always sits above it.  A large page over the fixed
+			 * MTRR area with its uncached VGA hole has an undefined
+			 * memory type.
+			 * The bound is written as a subtraction so the last chunk
+			 * before the wrap around at 4 GiB can never pass an
+			 * overflowed addition.
 			 */
 			if (large_pages
 			    && va >= (vm_offset_t) etext
